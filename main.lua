@@ -2,7 +2,6 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Camera = workspace.CurrentCamera
 
-local LocalPlayer = Players.LocalPlayer
 local UPDATE_DELAY = 0.017
 
 -- WEAPON SYSTEM & RARITIES
@@ -110,6 +109,96 @@ local function getWeapons(player)
 		if not container then return end
 		for _, tool in ipairs(container:GetChildren()) do
 			if tool:IsA("Tool") and tool.Name ~= "Fists" then
+				local info = getWeaponInfo(tool)
+				if info then
+					table.insert(items, {
+						Name = info.Name,
+						Rarity = info.Rarity
+					})
+				end
+			end
+		end
+	end
+
+	scan(player:FindFirstChild("Backpack"))
+	scan(player.Character)
+
+	return items
+end
+
+-- ESP RENDER
+local function createESP(player)
+	local weaponDrawings = {}
+	local last = 0
+
+	RunService.RenderStepped:Connect(function()
+		if tick() - last < UPDATE_DELAY then return end
+		last = tick()
+
+		local char = player.Character
+		if not char then
+			for _, draw in pairs(weaponDrawings) do draw.Visible = false end
+			return
+		end
+
+		local head = char:FindFirstChild("Head")
+		local root = char:FindFirstChild("HumanoidRootPart")
+		local humanoid = char:FindFirstChildOfClass("Humanoid")
+
+		if not head or not root or not humanoid or humanoid.Health <= 0 then
+			for _, draw in pairs(weaponDrawings) do draw.Visible = false end
+			return
+		end
+
+		local headPos, headVis = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+		local rootPos, rootVis = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 2.3, 0))
+
+		if not headVis or not rootVis or headPos.Z < 0 or rootPos.Z < 0 then
+			for _, draw in pairs(weaponDrawings) do draw.Visible = false end
+			return
+		end
+
+		local height = math.abs(headPos.Y - rootPos.Y)
+		local width = height / 2
+		local x = rootPos.X - width / 2
+		local y = headPos.Y
+
+		local items = getWeapons(player)
+
+		for _, draw in pairs(weaponDrawings) do
+			draw.Visible = false
+		end
+
+		for i, w in ipairs(items) do
+			if not weaponDrawings[i] then
+				local txt = Drawing.new("Text")
+				txt.Size = 13.75
+				txt.Center = true
+				txt.Outline = true
+				txt.Font = 2
+				weaponDrawings[i] = txt
+			end
+
+			local draw = weaponDrawings[i]
+			draw.Text = w.Name -- Muestra únicamente el nombre del arma
+			draw.Color = RarityColors[w.Rarity] or Color3.new(1, 1, 1) -- Mantiene el color por rareza
+			draw.Position = Vector2.new(
+				x + width / 2,
+				y + height + 6 + ((i - 1) * 12)
+			)
+			draw.Visible = true
+		end
+	end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+	createESP(p)
+end
+
+Players.PlayerAdded:Connect(function(p)
+	task.wait(1)
+	createESP(p)
+end)
 				local info = getWeaponInfo(tool)
 				if info then
 					table.insert(items, {
