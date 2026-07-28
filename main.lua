@@ -1,11 +1,11 @@
 --====================================================--
--- PYTHON_S - SCRIPT v6.6.2 (SOLO MODO AIM)
+-- PYTHON_S - SCRIPT v6.6.2 (MENÚ + AIM + VISUALS)
 --====================================================--
 
 -- PROTECCIÓN CONTRA DUPLICADOS
 local ScriptAlreadyLoaded = getgenv().PYTHON_S_V6_LOADED
 if ScriptAlreadyLoaded then
-    warn("[PYTHON_S] Script ya está cargado. Deteniendo ejecución duplicada.")
+    warn("[PYTHON_S] El script ya se encuentra cargado.")
     return
 end
 getgenv().PYTHON_S_V6_LOADED = true
@@ -15,46 +15,48 @@ local cloneref = (cloneref or clonereference or function(instance) return instan
 local RunService = cloneref(game:GetService("RunService"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
 local Players = cloneref(game:GetService("Players"))
+local CoreGui = cloneref(game:GetService("CoreGui"))
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
 -- CONFIGURACIÓN GLOBAL
-local ScriptConfig = {
-    TargetHistorySize = 10,
-    PredictionFrames = 3,
-    SafeCallMaxAttempts = 3,
-    Debug = false
-}
-
--- CONFIGURACIÓN DE AIMBOT
-local Aiming = {
-    Enabled = true,               -- Activar/Desactivar Aimbot
-    LockCamera = true,            -- Fijar la cámara al objetivo
-    ActivationMode = "Mantener",  -- "Mantener", "Alternar" o "Siempre"
-    KeyString = "MouseButton2",   -- Tecla o botón para activar (ej. MouseButton2 = Click Derecho)
-    AimPart = "Head",
-    AimMode = "Cabeza",           -- "Cabeza", "Cuerpo", "RPG" o "Legit"
-    FOVCenter = "Camara",
-    WallCheck = false,            -- Verificar si el objetivo está detrás de una pared
-    FriendCheck = false,          -- Ignorar amigos
-    TeamCheck = false,            -- Ignorar compañeros de equipo
-    UseMagnitude = false,         -- Límite por distancia en studs
-    MaxStuds = 500,
-    WhitelistedPlayers = {},
-    ExcludedPlayers = {},
-    FOV = 130,                    -- Radio del FOV de apuntado
-    ShowFOV = true,               -- Mostrar el círculo de FOV
-    ToggleState = false,
-    UsePredictiveAim = false,     -- Predicción de movimiento
-    UseSmoothTracking = false,    -- Apuntado suave (Smoothing)
-    SmoothFactor = 0.85,
-    DynamicFOV = false,
-}
-
--- CONFIGURACIÓN WEAPON AIM
-local WeaponAimConfig = {
-    Enabled = true
+local Config = {
+    -- AIMBOT
+    Aim = {
+        Enabled = true,
+        LockCamera = true,
+        ActivationMode = "Mantener", -- "Mantener", "Alternar", "Siempre"
+        KeyString = "MouseButton2",
+        AimPart = "Head",
+        AimMode = "Cabeza",          -- "Cabeza", "Cuerpo", "Legit"
+        FOV = 130,
+        ShowFOV = true,
+        WallCheck = false,
+        TeamCheck = false,
+        PredictiveAim = false,
+        SmoothTracking = false,
+        SmoothFactor = 0.85,
+        ToggleState = false
+    },
+    -- VISUALS (ESP)
+    Visuals = {
+        Enabled = true,
+        Boxes = true,
+        Names = true,
+        Distance = true,
+        HealthBar = true,
+        Tracers = false,
+        TeamCheck = false,
+        BoxColor = Color3.fromRGB(255, 50, 50),
+        TracerColor = Color3.fromRGB(255, 255, 255),
+        TextColor = Color3.fromRGB(255, 255, 255)
+    },
+    -- UI MENU
+    UI = {
+        MenuOpen = true,
+        ToggleKey = Enum.KeyCode.RightShift
+    }
 }
 
 -- UTILIDADES
@@ -67,282 +69,181 @@ function Utilities.ValidatePlayer(player)
 end
 
 function Utilities.GetSafeCamera()
-    if Camera and Camera.Parent then
-        return Camera
+    if Camera and Camera.Parent then return Camera end
+    Camera = workspace.CurrentCamera
+    return Camera
+end
+
+-- ====================================================--
+-- SISTEMA DE VISUALES (ESP)
+-- ====================================================--
+local ESPCache = {}
+
+local function CreateESP(player)
+    if ESPCache[player] then return end
+
+    local esp = {
+        Box = Drawing.new("Square"),
+        Name = Drawing.new("Text"),
+        Distance = Drawing.new("Text"),
+        HealthBarOutline = Drawing.new("Square"),
+        HealthBar = Drawing.new("Square"),
+        Tracer = Drawing.new("Line")
+    }
+
+    esp.Box.Thickness = 1
+    esp.Box.Filled = false
+    esp.Box.Color = Config.Visuals.BoxColor
+
+    esp.Name.Size = 14
+    esp.Name.Center = true
+    esp.Name.Outline = true
+    esp.Name.Color = Config.Visuals.TextColor
+
+    esp.Distance.Size = 12
+    esp.Distance.Center = true
+    esp.Distance.Outline = true
+    esp.Distance.Color = Config.Visuals.TextColor
+
+    esp.HealthBarOutline.Thickness = 1
+    esp.HealthBarOutline.Filled = true
+    esp.HealthBarOutline.Color = Color3.fromRGB(0, 0, 0)
+
+    esp.HealthBar.Thickness = 1
+    esp.HealthBar.Filled = true
+    esp.HealthBar.Color = Color3.fromRGB(0, 255, 0)
+
+    esp.Tracer.Thickness = 1
+    esp.Tracer.Color = Config.Visuals.TracerColor
+
+    ESPCache[player] = esp
+end
+
+local function RemoveESP(player)
+    if ESPCache[player] then
+        for _, obj in pairs(ESPCache[player]) do
+            obj:Remove()
+        end
+        ESPCache[player] = nil
     end
-    local newCam = workspace.CurrentCamera
-    if newCam and newCam.Parent then
-        Camera = newCam
-        return Camera
-    end
-    return nil
 end
 
-function Utilities.SafeDistance(pos1, pos2)
-    if not pos1 or not pos2 then return math.huge end
-    return (pos1 - pos2).Magnitude
-end
+local function UpdateESP()
+    local safeCamera = Utilities.GetSafeCamera()
+    if not safeCamera then return end
 
-function Utilities.GetScreenDistance(screenPos, center)
-    if not screenPos or not center then return math.huge end
-    return (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-end
+    for player, esp in pairs(ESPCache) do
+        if Config.Visuals.Enabled and Utilities.ValidatePlayer(player) and player ~= LocalPlayer then
+            if Config.Visuals.TeamCheck and player.Team == LocalPlayer.Team then
+                for _, obj in pairs(esp) do obj.Visible = false end
+                continue
+            end
 
-function Utilities.SafeTableClear(tbl)
-    if type(tbl) == "table" then
-        for k in pairs(tbl) do
-            tbl[k] = nil
+            local char = player.Character
+            local root = char.HumanoidRootPart
+            local head = char:FindFirstChild("Head")
+            local hum = char.Humanoid
+
+            local rootPos, onScreen = safeCamera:WorldToViewportPoint(root.Position)
+
+            if onScreen and head then
+                local headPos = safeCamera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+                local legPos = safeCamera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
+
+                local height = math.abs(headPos.Y - legPos.Y)
+                local width = height / 2
+
+                -- Box ESP
+                esp.Box.Size = Vector2.new(width, height)
+                esp.Box.Position = Vector2.new(rootPos.X - width / 2, rootPos.Y - height / 2)
+                esp.Box.Color = Config.Visuals.BoxColor
+                esp.Box.Visible = Config.Visuals.Boxes
+
+                -- Name ESP
+                esp.Name.Text = player.Name
+                esp.Name.Position = Vector2.new(rootPos.X, (rootPos.Y - height / 2) - 16)
+                esp.Name.Visible = Config.Visuals.Names
+
+                -- Distance ESP
+                local dist = math.floor((root.Position - safeCamera.CFrame.Position).Magnitude)
+                esp.Distance.Text = dist .. "m"
+                esp.Distance.Position = Vector2.new(rootPos.X, (rootPos.Y + height / 2) + 2)
+                esp.Distance.Visible = Config.Visuals.Distance
+
+                -- HealthBar ESP
+                if Config.Visuals.HealthBar then
+                    local healthPct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                    esp.HealthBarOutline.Size = Vector2.new(4, height)
+                    esp.HealthBarOutline.Position = Vector2.new((rootPos.X - width / 2) - 6, rootPos.Y - height / 2)
+                    esp.HealthBarOutline.Visible = true
+
+                    esp.HealthBar.Size = Vector2.new(2, height * healthPct)
+                    esp.HealthBar.Position = Vector2.new((rootPos.X - width / 2) - 5, (rootPos.Y + height / 2) - (height * healthPct))
+                    esp.HealthBar.Color = Color3.fromRGB(255 * (1 - healthPct), 255 * healthPct, 0)
+                    esp.HealthBar.Visible = true
+                else
+                    esp.HealthBarOutline.Visible = false
+                    esp.HealthBar.Visible = false
+                end
+
+                -- Tracers ESP
+                if Config.Visuals.Tracers then
+                    esp.Tracer.From = Vector2.new(safeCamera.ViewportSize.X / 2, safeCamera.ViewportSize.Y)
+                    esp.Tracer.To = Vector2.new(rootPos.X, rootPos.Y)
+                    esp.Tracer.Color = Config.Visuals.TracerColor
+                    esp.Tracer.Visible = true
+                else
+                    esp.Tracer.Visible = false
+                end
+            else
+                for _, obj in pairs(esp) do obj.Visible = false end
+            end
+        else
+            for _, obj in pairs(esp) do obj.Visible = false end
         end
     end
 end
 
--- SISTEMA DE PREDICCIÓN DE POSICIÓN
-local PredictionSystem = {}
-PredictionSystem.TargetHistory = {}
-PredictionSystem.HistoryLimit = ScriptConfig.TargetHistorySize
-
-function PredictionSystem.RecordPosition(player, position)
-    if not PredictionSystem.TargetHistory[player] then
-        PredictionSystem.TargetHistory[player] = {}
-    end
-
-    local history = PredictionSystem.TargetHistory[player]
-    table.insert(history, {
-        pos = position,
-        time = tick()
-    })
-
-    if #history > PredictionSystem.HistoryLimit then
-        table.remove(history, 1)
-    end
-end
-
-function PredictionSystem.PredictPosition(player, framesToPredict)
-    local history = PredictionSystem.TargetHistory[player]
-    if not history or #history < 2 then return nil end
-
-    local latest = history[#history]
-    local previous = history[#history - 1]
-
-    if not latest or not previous then return nil end
-
-    local velocity = (latest.pos - previous.pos) / math.max(latest.time - previous.time, 0.016)
-    local predictedPos = latest.pos + (velocity * (framesToPredict * 0.016))
-
-    return predictedPos
-end
-
-function PredictionSystem.Cleanup(player)
-    PredictionSystem.TargetHistory[player] = nil
-end
-
--- SISTEMA DE SUAVIZADO (SMOOTHING)
-local SmoothingSystem = {}
-
-function SmoothingSystem.GetSmoothedCamera(camera, targetPos, smoothFactor)
-    if not camera or not targetPos then return camera.CFrame end
-
-    local currentDir = camera.CFrame.LookVector
-    local targetDir = (targetPos - camera.CFrame.Position).Unit
-
-    local smoothedDir = currentDir:Lerp(targetDir, 1 - smoothFactor)
-    return CFrame.lookAt(camera.CFrame.Position, camera.CFrame.Position + smoothedDir)
-end
-
--- SISTEMA DE FOV DINÁMICO
-local DynamicFOVSystem = {}
-
-function DynamicFOVSystem.CalculateFOV(targetDistance, baseDistance)
-    baseDistance = baseDistance or 100
-    if targetDistance <= 0 then return 300 end
-
-    local ratio = math.min(targetDistance / baseDistance, 1)
-    local dynamicFOV = 50 + (300 - 50) * ratio
-
-    return math.clamp(dynamicFOV, 50, 300)
-end
-
--- CACHÉ DE PERSONAJES
-local CharacterPartCache = {}
-local PartCacheSystem = {}
-
-function PartCacheSystem.Create(char, player)
-    local cache = {
-        player = player,
-        character = char,
-        Head = char:FindFirstChild("Head"),
-        HumanoidRootPart = char:FindFirstChild("HumanoidRootPart"),
-        Humanoid = char:FindFirstChild("Humanoid")
-    }
-    CharacterPartCache[player] = cache
-    return cache
-end
-
-function PartCacheSystem.Get(player)
-    local cache = CharacterPartCache[player]
-    if cache and cache.character and cache.character.Parent then
-        return cache
-    end
-    return nil
-end
-
-function PartCacheSystem.Cleanup(player)
-    CharacterPartCache[player] = nil
-end
-
--- CÍRCULO DE FOV (DRAWING)
+-- ====================================================--
+-- CÍRCULO DE FOV Y AIMBOT
+-- ====================================================--
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1
 FOVCircle.NumSides = 60
 FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 FOVCircle.Visible = false
 
--- ESTADO INTERNO
-local CachedState = {
-    KeyActive = false,
-    ActiveEnemies = {},
-    LastVisibility = {},
-    LocalPlayerRoot = nil
-}
-
-local function UpdateEnemyList()
-    Utilities.SafeTableClear(CachedState.ActiveEnemies)
-    for _, p in pairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and not Aiming.WhitelistedPlayers[p.UserId] then
-            table.insert(CachedState.ActiveEnemies, p)
-        end
-    end
-end
-
-local function UpdateKeyState()
-    local Key = Aiming.KeyString
-    if not Key or Key == "" then
-        CachedState.KeyActive = false
-        return
-    end
-
-    if string.find(Key, "MouseButton") then
-        local enumVal = Enum.UserInputType[Key]
-        if enumVal then
-            CachedState.KeyActive = UserInputService:IsMouseButtonPressed(enumVal)
-        else
-            CachedState.KeyActive = false
-        end
-    else
-        local kc = Enum.KeyCode[Key:upper()]
-        if kc then
-            CachedState.KeyActive = UserInputService:IsKeyDown(kc)
-        else
-            CachedState.KeyActive = false
-        end
-    end
-end
-
 local function IsKeyActive()
-    if Aiming.ActivationMode == "Siempre" then return true end
-    if Aiming.ActivationMode == "Alternar" then return Aiming.ToggleState end
-    return CachedState.KeyActive
+    if Config.Aim.ActivationMode == "Siempre" then return true end
+    if Config.Aim.ActivationMode == "Alternar" then return Config.Aim.ToggleState end
+    return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 end
 
--- CHECK DE VISIBILIDAD (WALL CHECK)
-local function IsVisible(TargetPart, Character, player)
-    if not Aiming.WallCheck then return true end
-    if not TargetPart or not Character or not player then return true end
-
+local function GetTarget(Center)
     local safeCamera = Utilities.GetSafeCamera()
-    if not safeCamera or not LocalPlayer.Character then return true end
-
-    local origin = safeCamera.CFrame.Position
-    local targetPos = TargetPart.Position
-    local direction = targetPos - origin
-
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Blacklist
-    params.FilterDescendantsInstances = {LocalPlayer.Character}
-    params.IgnoreWater = true
-
-    local result = workspace:Raycast(origin, direction, params)
-
-    if not result or result.Instance:IsDescendantOf(Character) or result.Instance == TargetPart then
-        return true
-    end
-
-    return false
-end
-
--- SISTEMA AIMBOT
-local AimbotSystem = {}
-
-function AimbotSystem.FindTarget(Center)
-    if not Utilities.ValidatePlayer(LocalPlayer) then return nil end
-    if #CachedState.ActiveEnemies == 0 then return nil end
+    if not safeCamera then return nil end
 
     local Target = nil
-    local DistFOV = Aiming.FOV
+    local ClosestMag = Config.Aim.FOV
 
-    if Aiming.DynamicFOV then
-        local closestDist = math.huge
-        for _, p in ipairs(CachedState.ActiveEnemies) do
-            if Utilities.ValidatePlayer(p) and p.Character then
-                local dist = Utilities.SafeDistance(LocalPlayer.Character.HumanoidRootPart.Position, p.Character.HumanoidRootPart.Position)
-                if dist < closestDist then
-                    closestDist = dist
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and Utilities.ValidatePlayer(p) then
+            if Config.Aim.TeamCheck and p.Team == LocalPlayer.Team then continue end
+
+            local char = p.Character
+            local hum = char.Humanoid
+            if hum.Health <= 0 then continue end
+
+            local part = (Config.Aim.AimMode == "Cabeza") and char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+            if not part then continue end
+
+            local screenPos, onScreen = safeCamera:WorldToViewportPoint(part.Position)
+            if onScreen then
+                local mag = (Vector2.new(screenPos.X, screenPos.Y) - Center).Magnitude
+                if mag < ClosestMag then
+                    Target = part
+                    ClosestMag = mag
                 end
-            end
-        end
-        DistFOV = DynamicFOVSystem.CalculateFOV(closestDist, 100)
-    end
-
-    for _, p in ipairs(CachedState.ActiveEnemies) do
-        if not Utilities.ValidatePlayer(p) then continue end
-        if Aiming.TeamCheck and p.Team == LocalPlayer.Team then continue end
-        if Aiming.FriendCheck and LocalPlayer:IsFriendsWith(p.UserId) then continue end
-        if Aiming.ExcludedPlayers[p.UserId] then continue end
-
-        local cache = PartCacheSystem.Get(p) or PartCacheSystem.Create(p.Character, p)
-        if not cache then continue end
-
-        local hum = cache.Humanoid
-        if not hum or hum.Health <= 0 then continue end
-
-        local part = nil
-        if Aiming.AimMode == "Cabeza" then
-            part = cache.Head
-        elseif Aiming.AimMode == "Cuerpo" or Aiming.AimMode == "RPG" then
-            part = cache.HumanoidRootPart
-        elseif Aiming.AimMode == "Legit" then
-            local head = cache.Head
-            local torso = cache.HumanoidRootPart
-            local safeCamera = Utilities.GetSafeCamera()
-            if not safeCamera then continue end
-
-            local headPos, headOn = head and safeCamera:WorldToViewportPoint(head.Position) or nil, false
-            local torsoPos, torsoOn = torso and safeCamera:WorldToViewportPoint(torso.Position) or nil, false
-
-            local headDist = headOn and Utilities.GetScreenDistance(headPos, Center) or math.huge
-            local torsoDist = torsoOn and Utilities.GetScreenDistance(torsoPos, Center) or math.huge
-
-            part = headDist < torsoDist and head or torso
-        end
-
-        if not part then continue end
-
-        local localRoot = CachedState.LocalPlayerRoot or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
-        if Aiming.UseMagnitude and localRoot then
-            if Utilities.SafeDistance(localRoot.Position, part.Position) > Aiming.MaxStuds then
-                continue
-            end
-        end
-
-        local safeCamera = Utilities.GetSafeCamera()
-        if not safeCamera then continue end
-
-        local screenPos, onScreen = safeCamera:WorldToViewportPoint(part.Position)
-        if onScreen then
-            local mag = Utilities.GetScreenDistance(screenPos, Center)
-            if mag < DistFOV and IsVisible(part, p.Character, p) then
-                Target = part
-                DistFOV = mag
             end
         end
     end
@@ -350,112 +251,105 @@ function AimbotSystem.FindTarget(Center)
     return Target
 end
 
-function AimbotSystem.LockCamera(target)
-    if not target or not Aiming.LockCamera then return end
+-- ====================================================--
+-- INTERFAZ GRÁFICA (MENÚ UI)
+-- ====================================================--
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "PYTHON_S_UI"
+ScreenGui.ResetOnSpawn = false
+pcall(function() ScreenGui.Parent = CoreGui end) or pcall(function() ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end)
 
-    local safeCamera = Utilities.GetSafeCamera()
-    if not safeCamera then return end
+local MainFrame = Instance.new("Frame", ScreenGui)
+MainFrame.Size = UDim2.new(0, 380, 0, 320)
+MainFrame.Position = UDim2.new(0.5, -190, 0.5, -160)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
 
-    local aimPos = target.Position
-    local char = target.Parent
-    local hum = char and char:FindFirstChild("Humanoid")
+local Title = Instance.new("TextLabel", MainFrame)
+Title.Size = UDim2.new(1, 0, 0, 35)
+Title.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+Title.Text = "  🐍 PYTHON_S v6.6.2"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Font = Enum.Font.SourceSansBold
+Title.TextSize = 18
 
-    if hum and hum.SeatPart and hum.SeatPart:IsA("VehicleSeat") then
-        local head = char:FindFirstChild("Head")
-        if head then aimPos = head.Position end
-    end
+local Container = Instance.new("Frame", MainFrame)
+Container.Size = UDim2.new(1, -20, 1, -50)
+Container.Position = UDim2.new(0, 10, 0, 40)
+Container.BackgroundTransparency = 1
 
-    if Aiming.AimMode == "RPG" then
-        local rootPart = char and char:FindFirstChild("HumanoidRootPart")
-        if rootPart and hum then
-            local groundY = rootPart.Position.Y - (hum.HipHeight + rootPart.Size.Y / 2)
-            aimPos = Vector3.new(rootPart.Position.X, groundY, rootPart.Position.Z)
-        end
-    end
+local UIList = Instance.new("UIListLayout", Container)
+UIList.SortOrder = Enum.SortOrder.LayoutOrder
+UIList.Padding = UDim.new(0, 8)
 
-    if Aiming.UsePredictiveAim then
-        local player = Players:GetPlayerFromCharacter(target.Parent)
-        if player then
-            local predictedPos = PredictionSystem.PredictPosition(player, ScriptConfig.PredictionFrames)
-            if predictedPos then
-                aimPos = predictedPos
-            end
-        end
-    end
+local function CreateToggleButton(text, defaultState, callback)
+    local btn = Instance.new("TextButton", Container)
+    btn.Size = UDim2.new(1, 0, 0, 30)
+    btn.BackgroundColor3 = defaultState and Color3.fromRGB(40, 160, 80) or Color3.fromRGB(45, 45, 55)
+    btn.Text = "  " .. text .. ": " .. (defaultState and "ON" or "OFF")
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Font = Enum.Font.SourceSans
+    btn.TextSize = 16
+    btn.TextXAlignment = Enum.TextXAlignment.Left
 
-    if Aiming.UseSmoothTracking then
-        safeCamera.CFrame = SmoothingSystem.GetSmoothedCamera(safeCamera, aimPos, Aiming.SmoothFactor)
-    else
-        safeCamera.CFrame = CFrame.lookAt(safeCamera.CFrame.Position, aimPos)
-    end
-end
-
--- GESTIÓN DE JUGADORES
-local function InitPlayer(player)
-    if player == LocalPlayer then return end
-    player.CharacterAdded:Connect(function(char)
-        task.wait(0.5)
-        PartCacheSystem.Cleanup(player)
-        PartCacheSystem.Create(char, player)
+    local state = defaultState
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        btn.BackgroundColor3 = state and Color3.fromRGB(40, 160, 80) or Color3.fromRGB(45, 45, 55)
+        btn.Text = "  " .. text .. ": " .. (state and "ON" or "OFF")
+        callback(state)
     end)
-    if player.Character then
-        PartCacheSystem.Create(player.Character, player)
-    end
 end
 
-for _, p in ipairs(Players:GetPlayers()) do InitPlayer(p) end
-Players.PlayerAdded:Connect(InitPlayer)
-Players.PlayerRemoving:Connect(function(p)
-    PartCacheSystem.Cleanup(p)
-    PredictionSystem.Cleanup(p)
-end)
+-- BOTONES DEL MENÚ
+CreateToggleButton("Aimbot Activo", Config.Aim.Enabled, function(v) Config.Aim.Enabled = v end)
+CreateToggleButton("Mostrar FOV", Config.Aim.ShowFOV, function(v) Config.Aim.ShowFOV = v end)
+CreateToggleButton("Visuales ESP", Config.Visuals.Enabled, function(v) Config.Visuals.Enabled = v end)
+CreateToggleButton("ESP Boxes", Config.Visuals.Boxes, function(v) Config.Visuals.Boxes = v end)
+CreateToggleButton("ESP Nombres", Config.Visuals.Names, function(v) Config.Visuals.Names = v end)
+CreateToggleButton("ESP Distancia", Config.Visuals.Distance, function(v) Config.Visuals.Distance = v end)
+CreateToggleButton("ESP Barra de Vida", Config.Visuals.HealthBar, function(v) Config.Visuals.HealthBar = v end)
+CreateToggleButton("ESP Tracers", Config.Visuals.Tracers, function(v) Config.Visuals.Tracers = v end)
 
--- REGISTRO TECLA ALTERNAR (TOGGLE)
+-- MOSTRAR / OCULTAR MENÚ CON TECLA
 UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then return end
-    if Aiming.ActivationMode == "Alternar" then
-        local Key = Aiming.KeyString
-        if string.find(Key, "MouseButton") then
-            if input.UserInputType == Enum.UserInputType[Key] then
-                Aiming.ToggleState = not Aiming.ToggleState
-            end
-        else
-            if input.KeyCode == Enum.KeyCode[Key:upper()] then
-                Aiming.ToggleState = not Aiming.ToggleState
-            end
-        end
+    if not processed and input.KeyCode == Config.UI.ToggleKey then
+        Config.UI.MenuOpen = not Config.UI.MenuOpen
+        MainFrame.Visible = Config.UI.MenuOpen
     end
 end)
 
--- BUCLE PRINCIPAL (RENDERSTEPPED)
+-- GESTIÓN DE JUGADORES (ESP)
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= LocalPlayer then CreateESP(p) end
+end
+Players.PlayerAdded:Connect(CreateESP)
+Players.PlayerRemoving:Connect(RemoveESP)
+
+-- BUCLE PRINCIPAL
 RunService.RenderStepped:Connect(function()
     local safeCamera = Utilities.GetSafeCamera()
     if not safeCamera then return end
 
-    UpdateEnemyList()
-    UpdateKeyState()
+    -- Actualizar Visuales ESP
+    UpdateESP()
 
     -- Actualizar Círculo FOV
     local center = Vector2.new(safeCamera.ViewportSize.X / 2, safeCamera.ViewportSize.Y / 2)
     FOVCircle.Position = center
-    FOVCircle.Radius = Aiming.FOV
-    FOVCircle.Visible = Aiming.Enabled and Aiming.ShowFOV
+    FOVCircle.Radius = Config.Aim.FOV
+    FOVCircle.Visible = Config.Aim.Enabled and Config.Aim.ShowFOV
 
-    -- Grabar posiciones para predicción
-    for _, p in ipairs(CachedState.ActiveEnemies) do
-        if p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-            PredictionSystem.RecordPosition(p, p.Character.HumanoidRootPart.Position)
-        end
-    end
-
-    -- Ejecutar Aimbot
-    if Aiming.Enabled and IsKeyActive() then
-        local target = AimbotSystem.FindTarget(center)
+    -- Actualizar Aimbot
+    if Config.Aim.Enabled and IsKeyActive() then
+        local target = GetTarget(center)
         if target then
-            AimbotSystem.LockCamera(target)
+            safeCamera.CFrame = CFrame.lookAt(safeCamera.CFrame.Position, target.Position)
         end
     end
 end)
 
-print("[PYTHON_S] Módulo de AIM cargado correctamente.")
-
+print("[PYTHON_S] Menú UI, Aimbot y Visuales ESP cargados correctamente. Presiona 'RightShift' para ocultar/mostrar el menú.")
