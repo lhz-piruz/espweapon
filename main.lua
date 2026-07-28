@@ -1,355 +1,531 @@
 --====================================================--
--- PYTHON_S - SCRIPT v6.6.2 (MENÚ + AIM + VISUALS)
+-- PYTHON_S - SCRIPT v6.6.2 (HORIZONTAL LITE UI)
 --====================================================--
 
--- PROTECCIÓN CONTRA DUPLICADOS
 local ScriptAlreadyLoaded = getgenv().PYTHON_S_V6_LOADED
 if ScriptAlreadyLoaded then
-    warn("[PYTHON_S] El script ya se encuentra cargado.")
+    warn("[PYTHON_S] Script ya está cargado. Deteniendo ejecución duplicada.")
     return
 end
 getgenv().PYTHON_S_V6_LOADED = true
 
--- SERVICIOS
+--====================================================--
+-- SERVICIOS & UTILIDADES
+--====================================================--
 local cloneref = (cloneref or clonereference or function(instance) return instance end)
+local Players = cloneref(game:GetService("Players"))
 local RunService = cloneref(game:GetService("RunService"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
-local Players = cloneref(game:GetService("Players"))
-local CoreGui = cloneref(game:GetService("CoreGui"))
+local HttpService = cloneref(game:GetService("HttpService"))
+local TweenService = cloneref(game:GetService("TweenService"))
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
+local function GetSafeCamera()
+    if Camera and Camera.Parent then return Camera end
+    local newCam = workspace.CurrentCamera
+    if newCam and newCam.Parent then Camera = newCam; return Camera end
+    return nil
+end
+
+local function SafeName(player)
+    if not player then return "Unknown" end
+    local name = player.DisplayName
+    if name and name ~= "" then return tostring(name) end
+    name = player.Name
+    if name and name ~= "" then return tostring(name) end
+    return "Unknown"
+end
+
+--====================================================--
 -- CONFIGURACIÓN GLOBAL
-local Config = {
-    -- AIMBOT
-    Aim = {
-        Enabled = true,
-        LockCamera = true,
-        ActivationMode = "Mantener", -- "Mantener", "Alternar", "Siempre"
-        KeyString = "MouseButton2",
-        AimPart = "Head",
-        AimMode = "Cabeza",          -- "Cabeza", "Cuerpo", "Legit"
-        FOV = 130,
-        ShowFOV = true,
-        WallCheck = false,
-        TeamCheck = false,
-        PredictiveAim = false,
-        SmoothTracking = false,
-        SmoothFactor = 0.85,
-        ToggleState = false
-    },
-    -- VISUALS (ESP)
-    Visuals = {
-        Enabled = true,
-        Boxes = true,
-        Names = true,
-        Distance = true,
-        HealthBar = true,
-        Tracers = false,
-        TeamCheck = false,
-        BoxColor = Color3.fromRGB(255, 50, 50),
-        TracerColor = Color3.fromRGB(255, 255, 255),
-        TextColor = Color3.fromRGB(255, 255, 255)
-    },
-    -- UI MENU
-    UI = {
-        MenuOpen = true,
-        ToggleKey = Enum.KeyCode.RightShift
-    }
+--====================================================--
+local Aiming = {
+    Enabled = false,
+    LockCamera = true,
+    ActivationMode = "Mantener",
+    KeyString = "MouseButton2",
+    AimMode = "Cabeza",
+    WallCheck = false,
+    FriendCheck = false,
+    TeamCheck = false,
+    UseMagnitude = false,
+    MaxStuds = 500,
+    FOV = 130,
+    ShowFOV = false,
+    UsePredictiveAim = false,
+    UseSmoothTracking = false,
+    SmoothFactor = 0.85,
+    WhitelistedPlayers = {},
+    ExcludedPlayers = {},
+    WhitelistColor = Color3.fromRGB(0, 255, 127)
 }
 
--- UTILIDADES
-local Utilities = {}
+local ESPConfig = {
+    Name = false,
+    Health = false,
+    HealthPercent = false,
+    Chams = false,
+    ChamsColor = Color3.fromRGB(180, 0, 255),
+    Skeleton = false,
+    CornerBox = false,
+    Box = false,
+    PredictionLine = false,
+    Tool = false,
+    MaxDistance = 50000,
+    UpdateInterval = 0.1
+}
 
-function Utilities.ValidatePlayer(player)
-    return player and player.Parent and player.Character
-        and player.Character:FindFirstChild("Humanoid")
-        and player.Character:FindFirstChild("HumanoidRootPart")
+local CachedState = {
+    KeyActive = false,
+    ActiveEnemies = {},
+    CurrentTarget = nil,
+    LastVisibility = {},
+    PlayerDistanceCache = {},
+    LastChamsColor = ESPConfig.ChamsColor
+}
+
+local CharacterPartCache = {}
+local PlayerESPActive = {}
+local PlayerWeaponCache = {}
+local ESPDrawingObjects = {}
+
+--====================================================--
+-- SISTEMAS Y PREDICCIÓN
+--====================================================--
+local PredictionSystem = { TargetHistory = {}, HistoryLimit = 10 }
+
+function PredictionSystem.RecordPosition(player, position)
+    if not PredictionSystem.TargetHistory[player] then PredictionSystem.TargetHistory[player] = {} end
+    local history = PredictionSystem.TargetHistory[player]
+    table.insert(history, { pos = position, time = tick() })
+    if #history > PredictionSystem.HistoryLimit then table.remove(history, 1) end
 end
 
-function Utilities.GetSafeCamera()
-    if Camera and Camera.Parent then return Camera end
-    Camera = workspace.CurrentCamera
-    return Camera
+function PredictionSystem.PredictPosition(player, framesToPredict)
+    local history = PredictionSystem.TargetHistory[player]
+    if not history or #history < 2 then return nil end
+    local latest = history[#history]
+    local previous = history[#history - 1]
+    if not latest or not previous then return nil end
+    local velocity = (latest.pos - previous.pos) / math.max(latest.time - previous.time, 0.016)
+    return latest.pos + (velocity * (framesToPredict * 0.016))
 end
 
--- ====================================================--
--- SISTEMA DE VISUALES (ESP)
--- ====================================================--
-local ESPCache = {}
+function PredictionSystem.Cleanup(player)
+    PredictionSystem.TargetHistory[player] = nil
+end
 
-local function CreateESP(player)
-    if ESPCache[player] then return end
+local PartCacheSystem = {}
 
-    local esp = {
-        Box = Drawing.new("Square"),
-        Name = Drawing.new("Text"),
-        Distance = Drawing.new("Text"),
-        HealthBarOutline = Drawing.new("Square"),
-        HealthBar = Drawing.new("Square"),
-        Tracer = Drawing.new("Line")
+function PartCacheSystem.Create(char, player)
+    local cache = {
+        player = player, character = char,
+        Head = nil, HumanoidRootPart = nil, Humanoid = nil,
+        LastNameUpdate = 0, CachedName = nil, connections = {}
     }
-
-    esp.Box.Thickness = 1
-    esp.Box.Filled = false
-    esp.Box.Color = Config.Visuals.BoxColor
-
-    esp.Name.Size = 14
-    esp.Name.Center = true
-    esp.Name.Outline = true
-    esp.Name.Color = Config.Visuals.TextColor
-
-    esp.Distance.Size = 12
-    esp.Distance.Center = true
-    esp.Distance.Outline = true
-    esp.Distance.Color = Config.Visuals.TextColor
-
-    esp.HealthBarOutline.Thickness = 1
-    esp.HealthBarOutline.Filled = true
-    esp.HealthBarOutline.Color = Color3.fromRGB(0, 0, 0)
-
-    esp.HealthBar.Thickness = 1
-    esp.HealthBar.Filled = true
-    esp.HealthBar.Color = Color3.fromRGB(0, 255, 0)
-
-    esp.Tracer.Thickness = 1
-    esp.Tracer.Color = Config.Visuals.TracerColor
-
-    ESPCache[player] = esp
+    local function Update()
+        cache.Head = char:FindFirstChild("Head")
+        cache.HumanoidRootPart = char:FindFirstChild("HumanoidRootPart")
+        cache.Humanoid = char:FindFirstChild("Humanoid")
+    end
+    table.insert(cache.connections, char.DescendantAdded:Connect(Update))
+    Update()
+    CharacterPartCache[player] = cache
+    return cache
 end
 
-local function RemoveESP(player)
-    if ESPCache[player] then
-        for _, obj in pairs(ESPCache[player]) do
-            obj:Remove()
-        end
-        ESPCache[player] = nil
+function PartCacheSystem.Get(player)
+    local cache = CharacterPartCache[player]
+    if cache and cache.character and cache.character.Parent then return cache end
+    return nil
+end
+
+function PartCacheSystem.Cleanup(player)
+    local cache = CharacterPartCache[player]
+    if cache then
+        for _, conn in ipairs(cache.connections) do pcall(function() conn:Disconnect() end) end
+        CharacterPartCache[player] = nil
     end
 end
 
-local function UpdateESP()
-    local safeCamera = Utilities.GetSafeCamera()
-    if not safeCamera then return end
-
-    for player, esp in pairs(ESPCache) do
-        if Config.Visuals.Enabled and Utilities.ValidatePlayer(player) and player ~= LocalPlayer then
-            if Config.Visuals.TeamCheck and player.Team == LocalPlayer.Team then
-                for _, obj in pairs(esp) do obj.Visible = false end
-                continue
-            end
-
-            local char = player.Character
-            local root = char.HumanoidRootPart
-            local head = char:FindFirstChild("Head")
-            local hum = char.Humanoid
-
-            local rootPos, onScreen = safeCamera:WorldToViewportPoint(root.Position)
-
-            if onScreen and head then
-                local headPos = safeCamera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-                local legPos = safeCamera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
-
-                local height = math.abs(headPos.Y - legPos.Y)
-                local width = height / 2
-
-                -- Box ESP
-                esp.Box.Size = Vector2.new(width, height)
-                esp.Box.Position = Vector2.new(rootPos.X - width / 2, rootPos.Y - height / 2)
-                esp.Box.Color = Config.Visuals.BoxColor
-                esp.Box.Visible = Config.Visuals.Boxes
-
-                -- Name ESP
-                esp.Name.Text = player.Name
-                esp.Name.Position = Vector2.new(rootPos.X, (rootPos.Y - height / 2) - 16)
-                esp.Name.Visible = Config.Visuals.Names
-
-                -- Distance ESP
-                local dist = math.floor((root.Position - safeCamera.CFrame.Position).Magnitude)
-                esp.Distance.Text = dist .. "m"
-                esp.Distance.Position = Vector2.new(rootPos.X, (rootPos.Y + height / 2) + 2)
-                esp.Distance.Visible = Config.Visuals.Distance
-
-                -- HealthBar ESP
-                if Config.Visuals.HealthBar then
-                    local healthPct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-                    esp.HealthBarOutline.Size = Vector2.new(4, height)
-                    esp.HealthBarOutline.Position = Vector2.new((rootPos.X - width / 2) - 6, rootPos.Y - height / 2)
-                    esp.HealthBarOutline.Visible = true
-
-                    esp.HealthBar.Size = Vector2.new(2, height * healthPct)
-                    esp.HealthBar.Position = Vector2.new((rootPos.X - width / 2) - 5, (rootPos.Y + height / 2) - (height * healthPct))
-                    esp.HealthBar.Color = Color3.fromRGB(255 * (1 - healthPct), 255 * healthPct, 0)
-                    esp.HealthBar.Visible = true
-                else
-                    esp.HealthBarOutline.Visible = false
-                    esp.HealthBar.Visible = false
-                end
-
-                -- Tracers ESP
-                if Config.Visuals.Tracers then
-                    esp.Tracer.From = Vector2.new(safeCamera.ViewportSize.X / 2, safeCamera.ViewportSize.Y)
-                    esp.Tracer.To = Vector2.new(rootPos.X, rootPos.Y)
-                    esp.Tracer.Color = Config.Visuals.TracerColor
-                    esp.Tracer.Visible = true
-                else
-                    esp.Tracer.Visible = false
-                end
-            else
-                for _, obj in pairs(esp) do obj.Visible = false end
-            end
-        else
-            for _, obj in pairs(esp) do obj.Visible = false end
-        end
-    end
-end
-
--- ====================================================--
--- CÍRCULO DE FOV Y AIMBOT
--- ====================================================--
+--====================================================--
+-- DRAWING GRAPHICS
+--====================================================--
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Thickness = 1
 FOVCircle.NumSides = 60
 FOVCircle.Color = Color3.fromRGB(255, 255, 255)
 FOVCircle.Visible = false
 
-local function IsKeyActive()
-    if Config.Aim.ActivationMode == "Siempre" then return true end
-    if Config.Aim.ActivationMode == "Alternar" then return Config.Aim.ToggleState end
-    return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+local function UpdateFOVCircle()
+    local safeCamera = GetSafeCamera()
+    if not safeCamera then return end
+    FOVCircle.Visible = Aiming.ShowFOV and Aiming.Enabled
+    FOVCircle.Radius = Aiming.FOV
+    local mousePos = UserInputService:GetMouseLocation()
+    FOVCircle.Position = mousePos
 end
 
-local function GetTarget(Center)
-    local safeCamera = Utilities.GetSafeCamera()
+--====================================================--
+-- ESP SYSTEM
+--====================================================--
+local ESPSystem = {}
+
+function ESPSystem.CleanupDrawings(player)
+    local drawings = ESPDrawingObjects[player]
+    if not drawings then return end
+    if drawings.skeletonLines then
+        for _, line in pairs(drawings.skeletonLines) do pcall(function() line:Remove() end) end
+    end
+    if drawings.cornerLines then
+        for _, line in pairs(drawings.cornerLines) do pcall(function() line:Remove() end) end
+    end
+    if drawings.predictionLine then pcall(function() drawings.predictionLine:Remove() end) end
+    ESPDrawingObjects[player] = nil
+end
+
+function ESPSystem.CreatePlayerESP(char, player)
+    if not char or char:FindFirstChild("ESP_Billboard") then return end
+
+    local partCache = PartCacheSystem.Create(char, player)
+    if not partCache or not partCache.Humanoid or not partCache.HumanoidRootPart then return end
+
+    local predLine = Drawing.new("Line")
+    predLine.Visible = false
+    predLine.Thickness = 2
+
+    local skeletonLines = {}
+    local skeletonBones = {
+        {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "RightUpperArm"}, {"UpperTorso", "LeftUpperArm"},
+        {"LowerTorso", "RightUpperLeg"}, {"LowerTorso", "LeftUpperLeg"}
+    }
+    for _, bone in ipairs(skeletonBones) do
+        local line = Drawing.new("Line")
+        line.Thickness = 1
+        line.Visible = false
+        skeletonLines[bone[1] .. "_" .. bone[2]] = line
+    end
+
+    local cornerLines = {}
+    for i = 1, 8 do
+        local line = Drawing.new("Line")
+        line.Thickness = 2
+        line.Visible = false
+        cornerLines[i] = line
+    end
+
+    ESPDrawingObjects[player] = {
+        skeletonLines = skeletonLines,
+        cornerLines = cornerLines,
+        predictionLine = predLine
+    }
+
+    local box3D = Instance.new("BoxHandleAdornment")
+    box3D.AlwaysOnTop = true
+    box3D.ZIndex = 1
+    box3D.Transparency = 0.5
+    box3D.Visible = false
+
+    local highlight = Instance.new("Highlight", char)
+    highlight.Name = "ESP_Highlight"
+    highlight.FillColor = ESPConfig.ChamsColor
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.FillTransparency = 0.5
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+
+    local billboard = Instance.new("BillboardGui", char)
+    billboard.Name = "ESP_Billboard"
+    billboard.Adornee = partCache.HumanoidRootPart
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 99999
+    billboard.Size = UDim2.new(0, 180, 0, 50)
+    billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+
+    local mainFrame = Instance.new("Frame", billboard)
+    mainFrame.Size = UDim2.new(1, 0, 1, 0)
+    mainFrame.BackgroundTransparency = 1
+
+    local nameLabel = Instance.new("TextLabel", mainFrame)
+    nameLabel.Text = SafeName(player)
+    nameLabel.Size = UDim2.new(1, 0, 0, 16)
+    nameLabel.Font = Enum.Font.GothamBold
+    nameLabel.TextColor3 = Color3.new(1, 1, 1)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.TextSize = 14
+
+    local conn
+    conn = RunService.RenderStepped:Connect(function()
+        if not char or not char.Parent or not partCache.Humanoid or partCache.Humanoid.Health <= 0 then
+            ESPSystem.CleanupDrawings(player)
+            pcall(function() billboard:Destroy() highlight:Destroy() box3D:Destroy() end)
+            PartCacheSystem.Cleanup(player)
+            if conn then conn:Disconnect() end
+            return
+        end
+
+        local safeCamera = GetSafeCamera()
+        if not safeCamera then return end
+
+        local dist = (safeCamera.CFrame.Position - partCache.HumanoidRootPart.Position).Magnitude
+        local pos, onScreen = safeCamera:WorldToViewportPoint(partCache.HumanoidRootPart.Position)
+
+        billboard.Enabled = onScreen and dist <= ESPConfig.MaxDistance
+        highlight.Enabled = ESPConfig.Chams
+        nameLabel.Visible = ESPConfig.Name
+
+        local isTarget = (CachedState.CurrentTarget ~= nil and CachedState.CurrentTarget.Parent == char)
+        local espColor = isTarget and Color3.new(1, 0, 0) or Color3.new(1, 1, 1)
+
+        if ESPConfig.Box then
+            box3D.Size = Vector3.new(3, 5, 3)
+            box3D.Color3 = espColor
+            box3D.Adornee = partCache.HumanoidRootPart
+            box3D.Parent = partCache.HumanoidRootPart
+            box3D.Visible = true
+        else
+            box3D.Visible = false
+        end
+    end)
+end
+
+--====================================================--
+-- AIMBOT SYSTEM
+--====================================================--
+local function UpdateEnemyList()
+    table.clear(CachedState.ActiveEnemies)
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(CachedState.ActiveEnemies, p)
+        end
+    end
+end
+
+local function GetAimbotTarget()
+    local safeCamera = GetSafeCamera()
     if not safeCamera then return nil end
 
+    local Center = UserInputService:GetMouseLocation()
     local Target = nil
-    local ClosestMag = Config.Aim.FOV
+    local ClosestDist = Aiming.FOV
 
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and Utilities.ValidatePlayer(p) then
-            if Config.Aim.TeamCheck and p.Team == LocalPlayer.Team then continue end
+    for _, p in ipairs(CachedState.ActiveEnemies) do
+        if Aiming.TeamCheck and p.Team == LocalPlayer.Team then continue end
+        local cache = PartCacheSystem.Get(p)
+        if not cache or not cache.Humanoid or cache.Humanoid.Health <= 0 then continue end
 
-            local char = p.Character
-            local hum = char.Humanoid
-            if hum.Health <= 0 then continue end
+        local part = (Aiming.AimMode == "Cabeza") and cache.Head or cache.HumanoidRootPart
+        if not part then continue end
 
-            local part = (Config.Aim.AimMode == "Cabeza") and char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
-            if not part then continue end
-
-            local screenPos, onScreen = safeCamera:WorldToViewportPoint(part.Position)
-            if onScreen then
-                local mag = (Vector2.new(screenPos.X, screenPos.Y) - Center).Magnitude
-                if mag < ClosestMag then
-                    Target = part
-                    ClosestMag = mag
-                end
+        local screenPos, onScreen = safeCamera:WorldToViewportPoint(part.Position)
+        if onScreen then
+            local mag = (Vector2.new(screenPos.X, screenPos.Y) - Center).Magnitude
+            if mag < ClosestDist then
+                Target = part
+                ClosestDist = mag
             end
         end
     end
-
     return Target
 end
 
--- ====================================================--
--- INTERFAZ GRÁFICA (MENÚ UI)
--- ====================================================--
+local function UpdateKeyState()
+    local Key = Aiming.KeyString
+    if not Key or Key == "" then CachedState.KeyActive = false; return end
+
+    if string.find(Key, "MouseButton") then
+        local enumVal = Enum.UserInputType[Key]
+        if enumVal then CachedState.KeyActive = UserInputService:IsMouseButtonPressed(enumVal) end
+    else
+        local kc = Enum.KeyCode[Key:upper()]
+        if kc then CachedState.KeyActive = UserInputService:IsKeyDown(kc) end
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    UpdateFOVCircle()
+    UpdateKeyState()
+    UpdateEnemyList()
+
+    if Aiming.Enabled and (Aiming.ActivationMode == "Siempre" or CachedState.KeyActive) then
+        local target = GetAimbotTarget()
+        CachedState.CurrentTarget = target
+        if target and Aiming.LockCamera then
+            local safeCamera = GetSafeCamera()
+            if safeCamera then
+                local aimPos = target.Position
+                if Aiming.UsePredictiveAim then
+                    local player = Players:GetPlayerFromCharacter(target.Parent)
+                    if player then
+                        local pred = PredictionSystem.PredictPosition(player, 3)
+                        if pred then aimPos = pred end
+                    end
+                end
+                safeCamera.CFrame = CFrame.lookAt(safeCamera.CFrame.Position, aimPos)
+            end
+        end
+    else
+        CachedState.CurrentTarget = nil
+    end
+end)
+
+for _, p in ipairs(Players:GetPlayers()) do
+    if p ~= LocalPlayer then
+        if p.Character then ESPSystem.CreatePlayerESP(p.Character, p) end
+        p.CharacterAdded:Connect(function(c) ESPSystem.CreatePlayerESP(c, p) end)
+    end
+end
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function(c) ESPSystem.CreatePlayerESP(c, p) end)
+end)
+
+--====================================================--
+-- INTERFAZ GRÁFICA (UI HORIZONTAL LITE)
+--====================================================--
+if game.CoreGui:FindFirstChild("PythonUI_Horizontal") then
+    game.CoreGui:FindFirstChild("PythonUI_Horizontal"):Destroy()
+end
+
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "PYTHON_S_UI"
+ScreenGui.Name = "PythonUI_Horizontal"
 ScreenGui.ResetOnSpawn = false
-pcall(function() ScreenGui.Parent = CoreGui end) or pcall(function() ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end)
+ScreenGui.Parent = game.CoreGui
 
+-- Botón para Abrir/Cerrar Menú
+local ToggleButton = Instance.new("TextButton", ScreenGui)
+ToggleButton.Name = "OpenMenuButton"
+ToggleButton.Size = UDim2.new(0, 100, 0, 35)
+ToggleButton.Position = UDim2.new(0.02, 0, 0.1, 0)
+ToggleButton.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+ToggleButton.BorderSizePixel = 0
+ToggleButton.Text = "MENU"
+ToggleButton.TextColor3 = Color3.fromRGB(0, 220, 80)
+ToggleButton.Font = Enum.Font.GothamBold
+ToggleButton.TextSize = 14
+Instance.new("UICorner", ToggleButton).CornerRadius = UDim.new(0, 8)
+local toggleStroke = Instance.new("UIStroke", ToggleButton)
+toggleStroke.Color = Color3.fromRGB(0, 220, 80)
+toggleStroke.Thickness = 1
+
+-- Contenedor Principal (Barra Horizontal)
 local MainFrame = Instance.new("Frame", ScreenGui)
-MainFrame.Size = UDim2.new(0, 380, 0, 320)
-MainFrame.Position = UDim2.new(0.5, -190, 0.5, -160)
-MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 720, 0, 220)
+MainFrame.Position = UDim2.new(0.5, -360, 0.35, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
 MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
+MainFrame.Visible = true
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
+local mainStroke = Instance.new("UIStroke", MainFrame)
+mainStroke.Color = Color3.fromRGB(35, 35, 45)
+mainStroke.Thickness = 1
 
+ToggleButton.MouseButton1Click:Connect(function()
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
+-- Arrastre de la Barra Horizontal
+local dragging, dragStart, startPos
+MainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = MainFrame.Position
+    end
+end)
+MainFrame.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- Título
 local Title = Instance.new("TextLabel", MainFrame)
-Title.Size = UDim2.new(1, 0, 0, 35)
-Title.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-Title.Text = "  🐍 PYTHON_S v6.6.2"
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.Font = Enum.Font.SourceSansBold
-Title.TextSize = 18
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundTransparency = 1
+Title.Text = "PYTHON_S - LITE MENU"
+Title.TextColor3 = Color3.fromRGB(240, 240, 245)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 14
 
-local Container = Instance.new("Frame", MainFrame)
-Container.Size = UDim2.new(1, -20, 1, -50)
-Container.Position = UDim2.new(0, 10, 0, 40)
-Container.BackgroundTransparency = 1
+-- Layout Horizontal
+local HorizontalContainer = Instance.new("Frame", MainFrame)
+HorizontalContainer.Size = UDim2.new(1, -20, 1, -40)
+HorizontalContainer.Position = UDim2.new(0, 10, 0, 35)
+HorizontalContainer.BackgroundTransparency = 1
 
-local UIList = Instance.new("UIListLayout", Container)
-UIList.SortOrder = Enum.SortOrder.LayoutOrder
-UIList.Padding = UDim.new(0, 8)
+local Layout = Instance.new("UIListLayout", HorizontalContainer)
+Layout.FillDirection = Enum.FillDirection.Horizontal
+Layout.Padding = UDim.new(0, 10)
+Layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 
-local function CreateToggleButton(text, defaultState, callback)
-    local btn = Instance.new("TextButton", Container)
+-- Helper para Crear Secciones Animadas
+local function CreateSection(title)
+    local frame = Instance.new("Frame", HorizontalContainer)
+    frame.Size = UDim2.new(0.48, 0, 1, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+    frame.BorderSizePixel = 0
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+    
+    local secTitle = Instance.new("TextLabel", frame)
+    secTitle.Size = UDim2.new(1, 0, 0, 25)
+    secTitle.BackgroundTransparency = 1
+    secTitle.Text = title
+    secTitle.TextColor3 = Color3.fromRGB(0, 220, 80)
+    secTitle.Font = Enum.Font.GothamBold
+    secTitle.TextSize = 13
+
+    local scroll = Instance.new("ScrollingFrame", frame)
+    scroll.Size = UDim2.new(1, -10, 1, -30)
+    scroll.Position = UDim2.new(0, 5, 0, 25)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 2
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+    local list = Instance.new("UIListLayout", scroll)
+    list.Padding = UDim.new(0, 5)
+
+    return scroll
+end
+
+local function CreateToggle(parent, text, default, callback)
+    local btn = Instance.new("TextButton", parent)
     btn.Size = UDim2.new(1, 0, 0, 30)
-    btn.BackgroundColor3 = defaultState and Color3.fromRGB(40, 160, 80) or Color3.fromRGB(45, 45, 55)
-    btn.Text = "  " .. text .. ": " .. (defaultState and "ON" or "OFF")
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.Font = Enum.Font.SourceSans
-    btn.TextSize = 16
-    btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.BackgroundColor3 = default and Color3.fromRGB(0, 180, 60) or Color3.fromRGB(35, 35, 45)
+    btn.Text = text .. " : " .. (default and "ON" or "OFF")
+    btn.TextColor3 = Color3.fromRGB(240, 240, 245)
+    btn.Font = Enum.Font.GothamMedium
+    btn.TextSize = 12
+    btn.BorderSizePixel = 0
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
 
-    local state = defaultState
+    local state = default
     btn.MouseButton1Click:Connect(function()
         state = not state
-        btn.BackgroundColor3 = state and Color3.fromRGB(40, 160, 80) or Color3.fromRGB(45, 45, 55)
-        btn.Text = "  " .. text .. ": " .. (state and "ON" or "OFF")
+        btn.Text = text .. " : " .. (state and "ON" or "OFF")
+        btn.BackgroundColor3 = state and Color3.fromRGB(0, 180, 60) or Color3.fromRGB(35, 35, 45)
         callback(state)
     end)
 end
 
--- BOTONES DEL MENÚ
-CreateToggleButton("Aimbot Activo", Config.Aim.Enabled, function(v) Config.Aim.Enabled = v end)
-CreateToggleButton("Mostrar FOV", Config.Aim.ShowFOV, function(v) Config.Aim.ShowFOV = v end)
-CreateToggleButton("Visuales ESP", Config.Visuals.Enabled, function(v) Config.Visuals.Enabled = v end)
-CreateToggleButton("ESP Boxes", Config.Visuals.Boxes, function(v) Config.Visuals.Boxes = v end)
-CreateToggleButton("ESP Nombres", Config.Visuals.Names, function(v) Config.Visuals.Names = v end)
-CreateToggleButton("ESP Distancia", Config.Visuals.Distance, function(v) Config.Visuals.Distance = v end)
-CreateToggleButton("ESP Barra de Vida", Config.Visuals.HealthBar, function(v) Config.Visuals.HealthBar = v end)
-CreateToggleButton("ESP Tracers", Config.Visuals.Tracers, function(v) Config.Visuals.Tracers = v end)
+-- SECCIÓN AIM
+local AimScroll = CreateSection("AIMBOT")
+CreateToggle(AimScroll, "Activar Aim", Aiming.Enabled, function(v) Aiming.Enabled = v end)
+CreateToggle(AimScroll, "Mostrar FOV", Aiming.ShowFOV, function(v) Aiming.ShowFOV = v end)
+CreateToggle(AimScroll, "Predicción", Aiming.UsePredictiveAim, function(v) Aiming.UsePredictiveAim = v end)
 
--- MOSTRAR / OCULTAR MENÚ CON TECLA
-UserInputService.InputBegan:Connect(function(input, processed)
-    if not processed and input.KeyCode == Config.UI.ToggleKey then
-        Config.UI.MenuOpen = not Config.UI.MenuOpen
-        MainFrame.Visible = Config.UI.MenuOpen
-    end
-end)
+-- SECCIÓN VISUALS
+local VisualsScroll = CreateSection("VISUALS")
+CreateToggle(VisualsScroll, "Nombres", ESPConfig.Name, function(v) ESPConfig.Name = v end)
+CreateToggle(VisualsScroll, "Chams", ESPConfig.Chams, function(v) ESPConfig.Chams = v end)
+CreateToggle(VisualsScroll, "Caja 3D", ESPConfig.Box, function(v) ESPConfig.Box = v end)
 
--- GESTIÓN DE JUGADORES (ESP)
-for _, p in ipairs(Players:GetPlayers()) do
-    if p ~= LocalPlayer then CreateESP(p) end
-end
-Players.PlayerAdded:Connect(CreateESP)
-Players.PlayerRemoving:Connect(RemoveESP)
-
--- BUCLE PRINCIPAL
-RunService.RenderStepped:Connect(function()
-    local safeCamera = Utilities.GetSafeCamera()
-    if not safeCamera then return end
-
-    -- Actualizar Visuales ESP
-    UpdateESP()
-
-    -- Actualizar Círculo FOV
-    local center = Vector2.new(safeCamera.ViewportSize.X / 2, safeCamera.ViewportSize.Y / 2)
-    FOVCircle.Position = center
-    FOVCircle.Radius = Config.Aim.FOV
-    FOVCircle.Visible = Config.Aim.Enabled and Config.Aim.ShowFOV
-
-    -- Actualizar Aimbot
-    if Config.Aim.Enabled and IsKeyActive() then
-        local target = GetTarget(center)
-        if target then
-            safeCamera.CFrame = CFrame.lookAt(safeCamera.CFrame.Position, target.Position)
-        end
-    end
-end)
-
-print("[PYTHON_S] Menú UI, Aimbot y Visuales ESP cargados correctamente. Presiona 'RightShift' para ocultar/mostrar el menú.")
+print("[PYTHON_S] UI Lite Horizontal cargada con éxito.")
