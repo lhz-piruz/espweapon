@@ -39,7 +39,7 @@ end
 -- BASE DE DATOS COMPLETA CON TODOS LOS IDS
 local _L = {
     [9091227709] = {fechaLimite = _d(2026, 8, 21, 23, 59), diasIniciales = "30", rol = "USUARIO", producto = "N/A"},
-    [10908318368] = {fechaLimite = "Infinito", diasIniciales = "Infinito", rol = "OWNER", producto = "N/A"},
+    [10866795813] = {fechaLimite = "Infinito", diasIniciales = "Infinito", rol = "OWNER", producto = "N/A"},
     [4252198913] = {fechaLimite = "Infinito", diasIniciales = "Infinito", rol = "OWNER", producto = "N/A"},
     [4187247061] = {fechaLimite = _d(2026, 7, 23, 16, 46), diasIniciales = "5 horas", rol = "PRUEBA GRATIS", producto = "N/A"},
     [8744036907] = {fechaLimite = _d(2026, 8, 15, 23, 59), diasIniciales = "25", rol = "USUARIO", producto = "N/A"},
